@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chaikeliyekuchbhikarega — Chai Map</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <style>
+    html,body,#map { height:100%; margin:0; padding:0; }
+    body { font-family: Arial, Helvetica, sans-serif; }
+    #topbar { position:fixed; left:10px; right:10px; top:10px; z-index:1000; background:rgba(255,255,255,0.95); padding:10px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.15);}    
+    #filters { margin-top:8px; display:flex; flex-wrap:wrap; gap:8px; }
+    .filter-btn { padding:6px 10px; border-radius:6px; border:1px solid #ddd; cursor:pointer; background:#fff; }
+    .filter-active { background:#eee; }
+    #about { font-size:14px; }
+    #loading { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); background:rgba(255,255,255,0.95); padding:16px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,0.2); z-index:2000; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+      <div>
+        <strong>chaikeliyekuchbhikarega</strong> — community chai map
+        <div id="about">Add spots in the Google Sheet (link on site). Click a pin for details and directions.</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <a id="sheetLink" href="#" target="_blank">Open sheet</a>
+      </div>
+    </div>
+    <div id="filters"></div>
+  </div>
+  <div id="map"></div>
+  <div id="loading">Loading map libraries…</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <script>
+  const SHEET_CSV_URL = "REPLACE_WITH_YOUR_SHEET_CSV_URL";
+  const INITIAL_CENTER = [28.6139, 77.2090];
+  const INITIAL_ZOOM = 13;
+
+  function loadScript(url){
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.async = false;
+      s.onload = () => resolve();
+      s.onerror = () => reject();
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureLeafletAndCluster(){
+    if(typeof window.L === 'undefined'){
+      await loadScript('https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js');
+    }
+    if(!window.L || !window.L.MarkerClusterGroup){
+      await loadScript('https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js');
+    }
+  }
+
+  async function loadLibsAndInit(){
+    await ensureLeafletAndCluster();
+
+    const ld = document.getElementById('loading'); if(ld) ld.remove();
+    const map = L.map('map').setView(INITIAL_CENTER, INITIAL_ZOOM);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+    const markers = L.markerClusterGroup();
+    const allMarkers = [];
+    const tagSet = new Set();
+    let activeTags = new Set();
+
+    function el(tag, cls, txt){ const e = document.createElement(tag); if(cls) e.className = cls; if(txt) e.textContent = txt; return e; }
+
+    function buildFilters(){
+      const filters = document.getElementById('filters');
+      filters.innerHTML = '';
+      const sortedTags = Array.from(tagSet).sort();
+      sortedTags.forEach(t => {
+        const btn = el('button','filter-btn',t);
+        btn.onclick = () => {
+          if(activeTags.has(t)){ activeTags.delete(t); btn.classList.remove('filter-active'); }
+          else{ activeTags.add(t); btn.classList.add('filter-active'); }
+          refreshMarkers();
+        };
+        filters.appendChild(btn);
+      });
+      const clear = el('button','filter-btn','Clear filters');
+      clear.onclick = () => { activeTags.clear(); document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('filter-active')); refreshMarkers(); };
+      filters.appendChild(clear);
+    }
+
+    function refreshMarkers(){
+      markers.clearLayers();
+      allMarkers.forEach(o => {
+        const tags = (o.data.Tags || '').split(/[;,]\s*/).filter(Boolean);
+        if(activeTags.size === 0 || tags.some(t => activeTags.has(t))){ markers.addLayer(o.marker); }
+      });
+      map.addLayer(markers);
+    }
+
+    function addSpot(data){
+      const lat = parseFloat(data.Latitude);
+      const lng = parseFloat(data.Longitude);
+      if(isNaN(lat) || isNaN(lng)) return;
+
+      const title = data.Name || 'Unnamed';
+      const desc = data.Description || '';
+      const tags = data.Tags || '';
+      const photo = data.PhotoURL || '';
+      const website = data.Website || '';
+      const address = data.Address || '';
+      const hours = data.Hours || '';
+      const contact = data.Contact || '';
+
+      let popup = `<strong>${title}</strong><br/>${address ? address + '<br/>' : ''}`;
+      if(photo) popup += `<img src="${photo}" style="max-width:200px;display:block;margin:6px 0;">`;
+      if(desc) popup += `<div>${desc}</div>`;
+      if(hours) popup += `<div><em>Hours:</em> ${hours}</div>`;
+      if(contact) popup += `<div><em>Contact:</em> ${contact}</div>`;
+      if(website) popup += `<div><a href="${website}" target="_blank">Visit</a></div>`;
+      popup += `<div style="margin-top:6px;"><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}">Get directions</a></div>`;
+
+      const marker = L.marker([lat,lng]).bindPopup(popup);
+
+      tags.split(/[;,]\s*/).filter(Boolean).forEach(t=>tagSet.add(t));
+
+      allMarkers.push({ marker, data });
+      markers.addLayer(marker);
+    }
+
+    function loadDataFromCsv(url){
+      Papa.parse(url, {
+        download:true,
+        header:true,
+        skipEmptyLines:true,
+        complete: function(results){
+          results.data.forEach(r => addSpot(r));
+          buildFilters();
+          map.addLayer(markers);
+          if(allMarkers.length>0){ map.fitBounds(markers.getBounds(), { maxZoom:16 }); }
+        }
+      });
+    }
+
+    loadDataFromCsv(SHEET_CSV_URL);
+  }
+
+  loadLibsAndInit();
+  </script>
+</body>
+</html>
