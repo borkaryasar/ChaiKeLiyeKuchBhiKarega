@@ -1,0 +1,172 @@
+<!--
+chaikeliyekuchbhikarega - Leaflet starter
+
+WHAT THIS FILE DOES
+- Loads chai spot data from a public Google Sheet (CSV) and shows pins on a Leaflet map.
+- Adds marker clustering for many spots.
+- Builds tag-based filters from the Tags column (semicolon-separated).
+
+HOW TO USE (quick)
+1. Make a Google Sheet with headers (exact): Name,Address,Latitude,Longitude,Description,Tags,PhotoURL,Website,Hours,Contact
+2. Fill some rows (sample rows provided below in comments).
+3. In Google Sheets: File -> Share -> Publish to web -> choose CSV for the sheet; copy the CSV link.
+   Example CSV URL format: https://docs.google.com/spreadsheets/d/e/2PACX-.../pub?output=csv
+4. Replace the SHEET_CSV_URL value below with the CSV link from step 3.
+5. Save this file as index.html and host on GitHub Pages, Netlify, or open locally (some browsers block local CSV fetch; hosting recommended).
+
+SAMPLE ROWS (paste into the Sheet):
+Name,Address,Latitude,Longitude,Description,Tags,PhotoURL,Website,Hours,Contact
+Chai Corner,123 Market Rd,28.6139,77.2090,Strong cutting chai,cutting;stand,https://i.imgur.com/xxxx.jpg,http://example.com,8:00-20:00,+91-XXXXXXXXXX
+Cozy Chai House,45 Lane,28.6250,77.2100,Sit-in cafe with snacks,sit-in;bakery,https://i.imgur.com/yyyy.jpg,http://example.com,9:00-22:00,+91-XXXXXXXXXX
+
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Chaikeliyekuchbhikarega — Chai Map</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-sA+e2r9V+Z1k9Q+6QmXbq2p3nGk+gGk5q7rH6kA2B2o=" crossorigin=""/>
+  <!-- MarkerCluster CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <style>
+    html,body,#map { height:100%; margin:0; padding:0; }
+    body { font-family: Arial, Helvetica, sans-serif; }
+    #topbar { position:fixed; left:10px; right:10px; top:10px; z-index:1000; background:rgba(255,255,255,0.95); padding:10px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.15);}    
+    #filters { margin-top:8px; display:flex; flex-wrap:wrap; gap:8px; }
+    .filter-btn { padding:6px 10px; border-radius:6px; border:1px solid #ddd; cursor:pointer; background:#fff; }
+    .filter-active { background:#eee; }
+    #about { font-size:14px; }
+    @media (max-width:600px){ #topbar { left:6px; right:6px; top:6px; padding:8px; } }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+      <div>
+        <strong>chaikeliyekuchbhikarega</strong> — community chai map
+        <div id="about">Add spots in the Google Sheet (link on site). Click a pin for details and directions.</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <a id="sheetLink" href="#" target="_blank">Open sheet</a>
+      </div>
+    </div>
+    <div id="filters"></div>
+  </div>
+  <div id="map"></div>
+
+  <!-- Libraries: Leaflet, MarkerCluster, PapaParse -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-p6vQbG8m3Ck9Q0s6q7V9b6r6m1s9s0s9d6d7j8k9l0o=" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <script>
+  // ======== CONFIG ========
+  // Replace the value below with the CSV 'Publish to web' link from Google Sheets.
+  // Example: https://docs.google.com/spreadsheets/d/e/2PACX-.../pub?output=csv
+  const SHEET_CSV_URL = "REPLACE_WITH_YOUR_SHEET_CSV_URL";
+
+  // Optional: initial center & zoom (set to your city)
+  const INITIAL_CENTER = [28.6139, 77.2090]; // Delhi example
+  const INITIAL_ZOOM = 13;
+  // ========================
+
+  // Map setup
+  const map = L.map('map').setView(INITIAL_CENTER, INITIAL_ZOOM);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+  const markers = L.markerClusterGroup();
+  const allMarkers = []; // store {marker, data}
+  const tagSet = new Set();
+  let activeTags = new Set();
+
+  // Utility: create element
+  function el(tag, cls, txt){ const e = document.createElement(tag); if(cls) e.className = cls; if(txt) e.textContent = txt; return e; }
+
+  function buildFilters(){
+    const filters = document.getElementById('filters');
+    filters.innerHTML = '';
+    const sortedTags = Array.from(tagSet).sort();
+    sortedTags.forEach(t => {
+      const btn = el('button','filter-btn'); btn.textContent = t;
+      btn.addEventListener('click', () => {
+        if(activeTags.has(t)){ activeTags.delete(t); btn.classList.remove('filter-active'); }
+        else{ activeTags.add(t); btn.classList.add('filter-active'); }
+        refreshMarkers();
+      });
+      filters.appendChild(btn);
+    });
+    // Add 'clear' button
+    const clear = el('button','filter-btn'); clear.textContent = 'Clear filters'; clear.addEventListener('click', ()=>{ activeTags.clear(); document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('filter-active')); refreshMarkers(); });
+    filters.appendChild(clear);
+  }
+
+  function refreshMarkers(){
+    markers.clearLayers();
+    allMarkers.forEach(o => {
+      const tags = (o.data.Tags || '').split(/[;,]\s*/).map(s=>s.trim()).filter(Boolean);
+      if(activeTags.size === 0 || tags.some(t => activeTags.has(t))){ markers.addLayer(o.marker); }
+    });
+    map.addLayer(markers);
+  }
+
+  function addSpot(data){
+    // If lat/lng provided, use them; otherwise try to geocode later (not implemented)
+    const lat = parseFloat(data.Latitude);
+    const lng = parseFloat(data.Longitude);
+    if(isNaN(lat) || isNaN(lng)) return; // skip rows without coords
+
+    const title = data.Name || 'Unnamed';
+    const desc = data.Description || '';
+    const tags = data.Tags || '';
+    const photo = data.PhotoURL || '';
+    const website = data.Website || '';
+    const address = data.Address || '';
+    const hours = data.Hours || '';
+    const contact = data.Contact || '';
+
+    // build popup HTML
+    let popup = `<strong>${title}</strong><br/>${address ? address + '<br/>' : ''}`;
+    if(photo) popup += `<img src="${photo}" alt="${title}" style="max-width:200px; display:block; margin-top:6px; margin-bottom:6px;">`;
+    if(desc) popup += `<div style="margin-top:4px">${desc}</div>`;
+    if(hours) popup += `<div><em>Hours:</em> ${hours}</div>`;
+    if(contact) popup += `<div><em>Contact:</em> ${contact}</div>`;
+    if(website) popup += `<div><a href="${website}" target="_blank">Visit</a></div>`;
+    // directions link via Google Maps
+    popup += `<div style="margin-top:6px;"><a target="_blank" href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}">Get directions</a></div>`;
+
+    const marker = L.marker([lat,lng]);
+    marker.bindPopup(popup);
+
+    // collect tags
+    (tags.split(/[;,]\s*/).map(s=>s.trim()).filter(Boolean)).forEach(t=>tagSet.add(t));
+
+    allMarkers.push({ marker, data });
+    markers.addLayer(marker);
+  }
+
+  function loadDataFromCsv(url){
+    if(!url || url.includes('REPLACE_WITH')){
+      alert('Please set SHEET_CSV_URL in the HTML to the published Google Sheet CSV link.');
+      return;
+    }
+    document.getElementById('sheetLink').href = url;
+    Papa.parse(url, { download:true, header:true, skipEmptyLines:true, complete: function(results){
+      const rows = results.data;
+      rows.forEach(r => addSpot(r));
+      buildFilters();
+      map.addLayer(markers);
+      if(allMarkers.length>0){
+        map.fitBounds(markers.getBounds(), { maxZoom:16 });
+      }
+    }, error: function(err){ console.error('CSV load error', err); alert('Failed loading the sheet CSV — check the link and that the sheet is published to web.'); } });
+  }
+
+  // load data
+  loadDataFromCsv(SHEET_CSV_URL);
+
+  </script>
+</body>
+</html>
